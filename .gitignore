@@ -1,0 +1,21 @@
+# Binaries
+photonforge
+*.exe
+
+# Database
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test images (generated)
+sim/
+
+# Catalog data (large CSVs - download separately)
+data/
