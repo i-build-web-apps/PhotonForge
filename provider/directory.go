@@ -2,12 +2,18 @@ package provider
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
-	"gocv.io/x/gocv"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
 )
 
 // DirectoryProvider streams images from a folder, simulating a live camera feed.
@@ -15,8 +21,8 @@ import (
 // letting you verify that the alignment engine can correct for tracking drift.
 type DirectoryProvider struct {
 	Dir    string
-	Jitter bool // add random sub-pixel shifts to simulate tracking error
-	Loop   bool // restart from the beginning after the last image
+	Jitter bool
+	Loop   bool
 
 	files []string
 	index int
@@ -32,13 +38,16 @@ func (d *DirectoryProvider) Open() error {
 		return fmt.Errorf("directory provider: %w", err)
 	}
 
-	exts := map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".tif": true, ".tiff": true, ".bmp": true}
+	exts := map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true,
+		".tif": true, ".tiff": true, ".bmp": true,
+	}
 
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		ext := filepath.Ext(e.Name())
+		ext := strings.ToLower(filepath.Ext(e.Name()))
 		if exts[ext] {
 			d.files = append(d.files, filepath.Join(d.Dir, e.Name()))
 		}
@@ -53,31 +62,29 @@ func (d *DirectoryProvider) Open() error {
 	return nil
 }
 
-func (d *DirectoryProvider) Read(dst *gocv.Mat) bool {
+func (d *DirectoryProvider) Read() *image.NRGBA {
 	if len(d.files) == 0 {
-		return false
+		return nil
 	}
 
 	if d.index >= len(d.files) {
 		if !d.Loop {
-			return false
+			return nil
 		}
 		d.index = 0
 	}
 
-	img := gocv.IMRead(d.files[d.index], gocv.IMReadColor)
-	if img.Empty() {
-		return false
+	img, err := loadImage(d.files[d.index])
+	if err != nil {
+		return nil
 	}
 	d.index++
 
 	if d.Jitter {
-		d.applyJitter(&img)
+		img = applyJitter(img)
 	}
 
-	img.CopyTo(dst)
-	img.Close()
-	return true
+	return img
 }
 
 func (d *DirectoryProvider) Close() error {
@@ -86,12 +93,53 @@ func (d *DirectoryProvider) Close() error {
 	return nil
 }
 
-// applyJitter shifts the image by a random 1-3 pixel offset in X and Y using
-// an affine warp, simulating telescope tracking error.
-func (d *DirectoryProvider) applyJitter(mat *gocv.Mat) {
-	dx := float64(1 + rand.Intn(3))
-	dy := float64(1 + rand.Intn(3))
-	// Randomly negate to shift in any direction.
+// loadImage reads an image file and converts it to NRGBA.
+func loadImage(path string) (*image.NRGBA, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	ext := strings.ToLower(filepath.Ext(path))
+
+	var img image.Image
+	switch ext {
+	case ".png":
+		img, err = png.Decode(f)
+	case ".jpg", ".jpeg":
+		img, err = jpeg.Decode(f)
+	default:
+		// Use generic decoder for bmp, tiff, etc.
+		img, _, err = image.Decode(f)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return toNRGBA(img), nil
+}
+
+// toNRGBA converts any image.Image to *image.NRGBA.
+func toNRGBA(src image.Image) *image.NRGBA {
+	if nrgba, ok := src.(*image.NRGBA); ok {
+		return nrgba
+	}
+	b := src.Bounds()
+	dst := image.NewNRGBA(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dst.Set(x, y, src.At(x, y))
+		}
+	}
+	return dst
+}
+
+// applyJitter shifts the image by a random 1-3 pixel offset, simulating
+// telescope tracking error.
+func applyJitter(img *image.NRGBA) *image.NRGBA {
+	dx := 1 + rand.Intn(3)
+	dy := 1 + rand.Intn(3)
 	if rand.Intn(2) == 0 {
 		dx = -dx
 	}
@@ -99,18 +147,20 @@ func (d *DirectoryProvider) applyJitter(mat *gocv.Mat) {
 		dy = -dy
 	}
 
-	// 2x3 affine translation matrix: [[1, 0, dx], [0, 1, dy]]
-	warpMat := gocv.NewMatWithSize(2, 3, gocv.MatTypeCV64F)
-	defer warpMat.Close()
-	warpMat.SetDoubleAt(0, 0, 1)
-	warpMat.SetDoubleAt(0, 1, 0)
-	warpMat.SetDoubleAt(0, 2, dx)
-	warpMat.SetDoubleAt(1, 0, 0)
-	warpMat.SetDoubleAt(1, 1, 1)
-	warpMat.SetDoubleAt(1, 2, dy)
+	b := img.Bounds()
+	shifted := image.NewNRGBA(b)
 
-	dst := gocv.NewMat()
-	gocv.WarpAffine(*mat, &dst, warpMat, mat.Size())
-	dst.CopyTo(mat)
-	dst.Close()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			sx := x - dx
+			sy := y - dy
+			if sx >= b.Min.X && sx < b.Max.X && sy >= b.Min.Y && sy < b.Max.Y {
+				shifted.SetNRGBA(x, y, img.NRGBAAt(sx, sy))
+			} else {
+				shifted.SetNRGBA(x, y, color.NRGBA{A: 255})
+			}
+		}
+	}
+
+	return shifted
 }

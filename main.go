@@ -12,35 +12,50 @@ import (
 
 func main() {
 	mode := flag.String("mode", "webcam", "Input mode: 'webcam', 'test', or 'ingest'")
-	device := flag.Int("device", 0, "Webcam device ID (default 0)")
+	device := flag.String("device", "0", "Camera device ID (0 on Mac/Linux, device name on Windows)")
+	width := flag.Int("width", 640, "Capture width")
+	height := flag.Int("height", 480, "Capture height")
+	fps := flag.Int("fps", 30, "Capture framerate")
 	dir := flag.String("dir", "sim", "Directory of test images (used with -mode=test)")
 	jitter := flag.Bool("jitter", true, "Add random pixel jitter in test mode")
-	debug := flag.Bool("debug", false, "Show ORB keypoints overlay for alignment debugging")
+	debug := flag.Bool("debug", false, "Show star detection overlay for alignment debugging")
+	listCams := flag.Bool("list", false, "List available cameras and exit")
 	dbPath := flag.String("db", "photonforge.db", "Path to SQLite database")
 	hygCSV := flag.String("hyg", "", "Path to HYG v4.2 CSV (used with -mode=ingest)")
 	ngcCSV := flag.String("ngc", "", "Path to OpenNGC CSV (used with -mode=ingest)")
 	search := flag.String("search", "", "Search the catalog for an object by name, then exit")
 	flag.Parse()
 
-	// Ingest mode — import catalog data and exit.
+	// List cameras and exit.
+	if *listCams {
+		output, err := provider.ListDevices()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing devices: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(output)
+		return
+	}
+
+	// Ingest mode.
 	if *mode == "ingest" {
 		runIngest(*dbPath, *hygCSV, *ngcCSV)
 		return
 	}
 
-	// Search mode — quick catalog lookup.
+	// Search mode.
 	if *search != "" {
 		runSearch(*dbPath, *search)
 		return
 	}
 
-	// Live/test mode — open provider and run UI.
+	// Live/test mode.
 	var prov provider.ImageProvider
 
 	switch *mode {
 	case "webcam":
-		fmt.Println("PhotonForge — Webcam mode (device", *device, ")")
-		prov = provider.NewWebcamProvider(*device)
+		fmt.Printf("PhotonForge — Webcam mode (device %s, %dx%d@%dfps)\n", *device, *width, *height, *fps)
+		prov = provider.NewWebcamProvider(*device, *width, *height, *fps)
 
 	case "test":
 		fmt.Println("PhotonForge — Test mode (dir:", *dir, ")")

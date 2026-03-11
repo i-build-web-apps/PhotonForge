@@ -19,3 +19,6 @@ sim/
 
 # Catalog data (large CSVs - download separately)
 data/
+
+# Local OpenCV build (no longer needed)
+.opencv/

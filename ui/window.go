@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"image"
-	"image/color"
 	"sync"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
-	"gocv.io/x/gocv"
 
 	"github.com/paul/photonforge/engine"
 	"github.com/paul/photonforge/provider"
@@ -32,12 +30,10 @@ type Window struct {
 	img    *canvas.Image
 	status *widget.Label
 
-	// Stretch parameters (atomic-ish via mutex).
-	mu    sync.Mutex
-	black float64
-	gamma float64
-	white float64
-
+	mu      sync.Mutex
+	black   float64
+	gamma   float64
+	white   float64
 	running bool
 }
 
@@ -53,7 +49,7 @@ func New(prov provider.ImageProvider, debug bool) *Window {
 
 // Run opens the window and starts the capture loop. Blocks until closed.
 func (w *Window) Run() {
-	w.stacker = engine.NewStacker(w.debug, 2)
+	w.stacker = engine.NewStacker(w.debug, 4)
 
 	w.app = app.New()
 	w.win = w.app.NewWindow("PhotonForge")
@@ -74,13 +70,11 @@ func (w *Window) Run() {
 	w.status = widget.NewLabel("Frames: 0 | Matches: 0")
 
 	// --- Controls ---
-
 	forgeBtn := widget.NewButton("Forge (New Stack)", func() {
 		w.stacker.Reset()
 		w.status.SetText("Stack reset — Forging…")
 	})
 
-	// Black level slider: 0–255
 	blackLabel := widget.NewLabel("Black: 0")
 	blackSlider := widget.NewSlider(0, 255)
 	blackSlider.Value = 0
@@ -91,7 +85,6 @@ func (w *Window) Run() {
 		blackLabel.SetText(fmt.Sprintf("Black: %.0f", v))
 	}
 
-	// Gamma slider: 0.1–5.0
 	gammaLabel := widget.NewLabel("Gamma: 1.0")
 	gammaSlider := widget.NewSlider(0.1, 5.0)
 	gammaSlider.Value = 1.0
@@ -103,9 +96,8 @@ func (w *Window) Run() {
 		gammaLabel.SetText(fmt.Sprintf("Gamma: %.1f", v))
 	}
 
-	// White level slider: 1–10000 (accumulator values grow with frame count)
 	whiteLabel := widget.NewLabel("White: 255")
-	whiteSlider := widget.NewSlider(1, 10000)
+	whiteSlider := widget.NewSlider(1, 50000)
 	whiteSlider.Value = 255
 	whiteSlider.OnChanged = func(v float64) {
 		w.mu.Lock()
@@ -133,7 +125,6 @@ func (w *Window) Run() {
 
 	w.win.ShowAndRun()
 
-	// Cleanup after window closes.
 	w.stacker.Close()
 }
 
@@ -143,7 +134,6 @@ func (w *Window) Stop() {
 	w.mu.Unlock()
 }
 
-// captureLoop reads frames from the provider and feeds them to the stacker.
 func (w *Window) captureLoop() {
 	if err := w.provider.Open(); err != nil {
 		w.status.SetText("Error: " + err.Error())
@@ -154,9 +144,6 @@ func (w *Window) captureLoop() {
 	w.mu.Lock()
 	w.running = true
 	w.mu.Unlock()
-
-	frame := gocv.NewMat()
-	defer frame.Close()
 
 	ticker := time.NewTicker(time.Second / targetFPS)
 	defer ticker.Stop()
@@ -172,81 +159,27 @@ func (w *Window) captureLoop() {
 		white := w.white
 		w.mu.Unlock()
 
-		if !w.provider.Read(&frame) {
+		frame := w.provider.Read()
+		if frame == nil {
 			w.status.SetText("Feed ended")
 			return
 		}
-		if frame.Empty() {
-			continue
-		}
 
-		// Submit frame to the stacker's background worker.
 		w.stacker.Submit(frame)
 
-		// Get the stretched display image from the accumulator.
 		count := w.stacker.FrameCount()
 		matches := w.stacker.LatestMatches()
 
-		var displayMat gocv.Mat
+		var displayImg *image.NRGBA
 		if count > 0 {
-			displayMat = w.stacker.GetDisplay(black, gamma, white)
-		} else {
-			displayMat = gocv.NewMat()
+			displayImg = w.stacker.GetDisplay(black, gamma, white)
 		}
 
-		if !displayMat.Empty() {
-			goImg := matToImage(displayMat)
-			w.img.Image = goImg
+		if displayImg != nil {
+			w.img.Image = displayImg
 			w.img.Refresh()
 		}
-		displayMat.Close()
 
 		w.status.SetText(fmt.Sprintf("Frames: %d | Matches: %d", count, matches))
 	}
-}
-
-// matToImage converts a GoCV BGR Mat to a Go image.NRGBA for Fyne display.
-func matToImage(mat gocv.Mat) *image.NRGBA {
-	rows := mat.Rows()
-	cols := mat.Cols()
-	channels := mat.Channels()
-
-	img := image.NewNRGBA(image.Rect(0, 0, cols, rows))
-	data, _ := mat.DataPtrUint8()
-
-	switch channels {
-	case 1: // Grayscale
-		for y := 0; y < rows; y++ {
-			for x := 0; x < cols; x++ {
-				v := data[y*cols+x]
-				img.SetNRGBA(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
-			}
-		}
-	case 3: // BGR → RGBA
-		stride := cols * 3
-		for y := 0; y < rows; y++ {
-			rowStart := y * stride
-			for x := 0; x < cols; x++ {
-				px := rowStart + x*3
-				b := data[px]
-				g := data[px+1]
-				r := data[px+2]
-				img.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: 255})
-			}
-		}
-	case 4: // BGRA → RGBA
-		stride := cols * 4
-		for y := 0; y < rows; y++ {
-			rowStart := y * stride
-			for x := 0; x < cols; x++ {
-				px := rowStart + x*4
-				b := data[px]
-				g := data[px+1]
-				r := data[px+2]
-				a := data[px+3]
-				img.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: a})
-			}
-		}
-	}
-	return img
 }
