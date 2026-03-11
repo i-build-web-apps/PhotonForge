@@ -28,6 +28,10 @@ func (a *Aligner) Reset() {
 	a.refStars = nil
 }
 
+func (a *Aligner) SetDebug(on bool) {
+	a.debug = on
+}
+
 // AlignResult holds the output of an alignment pass.
 type AlignResult struct {
 	Image   *image.NRGBA
