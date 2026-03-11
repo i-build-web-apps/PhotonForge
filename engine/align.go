@@ -61,9 +61,11 @@ func (a *Aligner) Align(frame *image.NRGBA) AlignResult {
 		debugImg := cloneImage(frame)
 		drawStars(debugImg, stars, color.NRGBA{R: 0, G: 255, B: 0, A: 255})
 		for _, p := range pairs {
-			drawLine(debugImg, int(stars[p[0]].X), int(stars[p[0]].Y),
-				int(a.refStars[p[1]].X), int(a.refStars[p[1]].Y),
-				color.NRGBA{R: 255, G: 255, B: 0, A: 255})
+			if p[0] < len(stars) && p[1] < len(a.refStars) {
+				drawLine(debugImg, int(stars[p[0]].X), int(stars[p[0]].Y),
+					int(a.refStars[p[1]].X), int(a.refStars[p[1]].Y),
+					color.NRGBA{R: 255, G: 255, B: 0, A: 255})
+			}
 		}
 		if len(pairs) < 3 {
 			return AlignResult{Image: debugImg, Matches: len(pairs)}
@@ -240,6 +242,9 @@ func computeAffine(src, dst []Star, pairs [][2]int) [6]float64 {
 	var atb [6]float64
 
 	for _, p := range pairs {
+		if p[0] >= len(src) || p[1] >= len(dst) {
+			continue
+		}
 		sx := src[p[0]].X
 		sy := src[p[0]].Y
 		dx := dst[p[1]].X
