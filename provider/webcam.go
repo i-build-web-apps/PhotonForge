@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // WebcamProvider captures frames from a camera via ffmpeg.
@@ -19,6 +20,7 @@ type WebcamProvider struct {
 	Height   int
 	FPS      int
 
+	mu     sync.Mutex
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
 	buf    []byte // reusable read buffer for one raw frame
@@ -53,12 +55,15 @@ func (w *WebcamProvider) Open() error {
 }
 
 func (w *WebcamProvider) Read() *image.NRGBA {
-	if w.stdout == nil {
+	w.mu.Lock()
+	stdout := w.stdout
+	w.mu.Unlock()
+	if stdout == nil {
 		return nil
 	}
 
 	// Read exactly one frame of raw RGB24 data.
-	if _, err := io.ReadFull(w.stdout, w.buf); err != nil {
+	if _, err := io.ReadFull(stdout, w.buf); err != nil {
 		return nil
 	}
 
@@ -66,9 +71,21 @@ func (w *WebcamProvider) Read() *image.NRGBA {
 }
 
 func (w *WebcamProvider) Close() error {
-	if w.cmd != nil && w.cmd.Process != nil {
-		w.cmd.Process.Kill()
-		w.cmd.Wait()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.cmd == nil {
+		return nil // already closed
+	}
+	cmd := w.cmd
+	stdout := w.stdout
+	w.cmd = nil
+	w.stdout = nil
+	if stdout != nil {
+		stdout.Close() // unblocks any concurrent io.ReadFull in Read()
+	}
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
 	}
 	return nil
 }
@@ -92,6 +109,70 @@ func ListDevices() (string, error) {
 	return string(out), nil
 }
 
+// VideoDevice represents a detected camera.
+type VideoDevice struct {
+	Index string // "0", "1", etc.
+	Name  string // Human-readable name
+	UID   string // Platform-specific unique ID (macOS AVFoundation uniqueID)
+}
+
+// ListVideoDevices returns a parsed list of available video capture devices.
+// Returns an empty slice (not an error) if ffmpeg is not installed.
+func ListVideoDevices() []VideoDevice {
+	raw, err := ListDevices()
+	if err != nil {
+		return nil
+	}
+	return parseVideoDevices(raw)
+}
+
+func parseVideoDevices(raw string) []VideoDevice {
+	var devices []VideoDevice
+	lines := strings.Split(raw, "\n")
+	inVideo := false
+
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+
+		// Detect section boundaries.
+		if strings.Contains(lower, "video devices") {
+			inVideo = true
+			continue
+		}
+		if strings.Contains(lower, "audio devices") {
+			inVideo = false
+			continue
+		}
+
+		if !inVideo {
+			continue
+		}
+
+		// Parse "[0] Device Name" pattern.
+		// Works for both AVFoundation and DirectShow output.
+		idx := strings.Index(line, "[")
+		if idx < 0 {
+			continue
+		}
+		end := strings.Index(line[idx:], "]")
+		if end < 0 {
+			continue
+		}
+		devIndex := line[idx+1 : idx+end]
+		devName := strings.TrimSpace(line[idx+end+1:])
+
+		// Skip screen capture devices.
+		if strings.Contains(strings.ToLower(devName), "capture screen") {
+			continue
+		}
+
+		if devName != "" {
+			devices = append(devices, VideoDevice{Index: devIndex, Name: devName})
+		}
+	}
+	return devices
+}
+
 func (w *WebcamProvider) buildFFmpegArgs() []string {
 	size := fmt.Sprintf("%dx%d", w.Width, w.Height)
 	fps := fmt.Sprintf("%d", w.FPS)
@@ -100,9 +181,10 @@ func (w *WebcamProvider) buildFFmpegArgs() []string {
 	case "darwin":
 		return []string{
 			"-f", "avfoundation",
+			"-pixel_format", "nv12",
 			"-framerate", fps,
-			"-video_size", size,
 			"-i", w.DeviceID,
+			"-vf", fmt.Sprintf("scale=%d:%d", w.Width, w.Height),
 			"-pix_fmt", "rgb24",
 			"-f", "rawvideo",
 			"-v", "error",

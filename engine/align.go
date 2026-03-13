@@ -10,10 +10,11 @@ import (
 // star centroid matching. It detects stars, matches triangle patterns,
 // and computes an affine transform to warp each frame into alignment.
 type Aligner struct {
-	refStars []Star
-	refSet   bool
-	debug    bool
-	maxStars int
+	refStars    []Star
+	refSet      bool
+	debug       bool
+	maxStars    int
+	latestStars []Star
 }
 
 func NewAligner(debug bool) *Aligner {
@@ -26,62 +27,83 @@ func NewAligner(debug bool) *Aligner {
 func (a *Aligner) Reset() {
 	a.refSet = false
 	a.refStars = nil
+	a.latestStars = nil
+}
+
+// LatestStars returns the stars detected in the most recent frame.
+func (a *Aligner) LatestStars() []Star {
+	return a.latestStars
 }
 
 func (a *Aligner) SetDebug(on bool) {
 	a.debug = on
 }
 
+// SetMaxStars changes the maximum number of stars used for detection and matching.
+func (a *Aligner) SetMaxStars(n int) {
+	if n < 10 {
+		n = 10
+	}
+	if n > 500 {
+		n = 500
+	}
+	a.maxStars = n
+}
+
 // AlignResult holds the output of an alignment pass.
 type AlignResult struct {
-	Image   *image.NRGBA
-	Matches int
-	Err     error
+	Image         *image.NRGBA
+	Matches       int
+	DetectedStars int
+	Err           error
 }
 
 // Align warps the input frame to match the reference. The first frame
 // after creation or Reset() becomes the reference.
 func (a *Aligner) Align(frame *image.NRGBA) AlignResult {
 	stars := DetectStars(frame, a.maxStars)
+	a.latestStars = stars
+
+	detected := len(stars)
 
 	if !a.refSet {
 		a.refStars = stars
 		a.refSet = true
-		result := cloneImage(frame)
+		// frame is already a clone from Submit() — safe to modify in place.
 		if a.debug {
-			drawStars(result, stars, color.NRGBA{R: 0, G: 255, B: 0, A: 255})
+			drawStars(frame, stars, color.NRGBA{R: 0, G: 255, B: 0, A: 255})
 		}
-		return AlignResult{Image: result, Matches: len(stars)}
+		return AlignResult{Image: frame, Matches: detected, DetectedStars: detected}
 	}
 
 	// Match stars between current frame and reference using triangle voting.
 	pairs := matchStars(stars, a.refStars)
 
 	if a.debug {
-		debugImg := cloneImage(frame)
-		drawStars(debugImg, stars, color.NRGBA{R: 0, G: 255, B: 0, A: 255})
+		// frame is already a clone from Submit() — safe to draw on directly.
+		drawStars(frame, stars, color.NRGBA{R: 0, G: 255, B: 0, A: 255})
 		for _, p := range pairs {
 			if p[0] < len(stars) && p[1] < len(a.refStars) {
-				drawLine(debugImg, int(stars[p[0]].X), int(stars[p[0]].Y),
+				drawLine(frame, int(stars[p[0]].X), int(stars[p[0]].Y),
 					int(a.refStars[p[1]].X), int(a.refStars[p[1]].Y),
 					color.NRGBA{R: 255, G: 255, B: 0, A: 255})
 			}
 		}
 		if len(pairs) < 3 {
-			return AlignResult{Image: debugImg, Matches: len(pairs)}
+			return AlignResult{Image: frame, Matches: len(pairs), DetectedStars: detected}
 		}
 		tx := computeAffine(stars, a.refStars, pairs)
-		result := warpAffine(debugImg, tx)
-		return AlignResult{Image: result, Matches: len(pairs)}
+		result := warpAffine(frame, tx)
+		return AlignResult{Image: result, Matches: len(pairs), DetectedStars: detected}
 	}
 
 	if len(pairs) < 3 {
-		return AlignResult{Image: cloneImage(frame), Matches: len(pairs)}
+		return AlignResult{Image: frame, Matches: len(pairs), DetectedStars: detected}
 	}
 
 	tx := computeAffine(stars, a.refStars, pairs)
 	result := warpAffine(frame, tx)
-	return AlignResult{Image: result, Matches: len(pairs)}
+	return AlignResult{Image: result, Matches: len(pairs), DetectedStars: detected}
 }
 
 // matchStars pairs stars between two frames using triangle similarity voting.

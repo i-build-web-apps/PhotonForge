@@ -4,13 +4,18 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 
+	"github.com/paul/photonforge/automation"
 	"github.com/paul/photonforge/db"
 	"github.com/paul/photonforge/provider"
 	"github.com/paul/photonforge/ui"
 )
 
 func main() {
+	// Cap heap to 1GB — prevents Go GC from letting memory balloon
+	// while still allowing large imported images.
+	debug.SetMemoryLimit(1 << 30)
 	mode := flag.String("mode", "webcam", "Input mode: 'webcam', 'test', or 'ingest'")
 	device := flag.String("device", "0", "Camera device ID (0 on Mac/Linux, device name on Windows)")
 	width := flag.Int("width", 640, "Capture width")
@@ -20,10 +25,11 @@ func main() {
 	jitter := flag.Bool("jitter", true, "Add random pixel jitter in test mode")
 	debug := flag.Bool("debug", false, "Show star detection overlay for alignment debugging")
 	listCams := flag.Bool("list", false, "List available cameras and exit")
-	dbPath := flag.String("db", "photonforge.db", "Path to SQLite database")
+	dbPath := flag.String("db", "data/photonforge.db", "Path to SQLite catalog database")
 	hygCSV := flag.String("hyg", "", "Path to HYG v4.2 CSV (used with -mode=ingest)")
 	ngcCSV := flag.String("ngc", "", "Path to OpenNGC CSV (used with -mode=ingest)")
 	search := flag.String("search", "", "Search the catalog for an object by name, then exit")
+	autoAddr := flag.String("automation", "", "Enable automation HTTP API on this address (e.g., 127.0.0.1:9876)")
 	flag.Parse()
 
 	// List cameras and exit.
@@ -50,23 +56,48 @@ func main() {
 	}
 
 	// Live/test mode.
-	var prov provider.ImageProvider
-
 	switch *mode {
-	case "webcam":
-		fmt.Printf("PhotonForge — Webcam mode (device %s, %dx%d@%dfps)\n", *device, *width, *height, *fps)
-		prov = provider.NewWebcamProvider(*device, *width, *height, *fps)
-
-	case "test":
-		fmt.Println("PhotonForge — Test mode (dir:", *dir, ")")
-		prov = provider.NewDirectoryProvider(*dir, *jitter, true)
-
+	case "webcam", "test":
+		// valid
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown mode: %s (use 'webcam', 'test', or 'ingest')\n", *mode)
 		os.Exit(1)
 	}
 
-	win := ui.New(prov, *debug)
+	cfg := &ui.CaptureConfig{
+		Mode:    *mode,
+		Device:  *device,
+		Width:   *width,
+		Height:  *height,
+		FPS:     *fps,
+		TestDir: *dir,
+		Jitter:  *jitter,
+	}
+
+	// Open database if a path is provided (non-empty). The DB is optional;
+	// features that use it degrade gracefully when store is nil.
+	var store *db.Store
+	if *dbPath != "" {
+		var err error
+		store, err = db.Open(*dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not open database %q: %v\n", *dbPath, err)
+		} else {
+			defer store.Close()
+		}
+	}
+
+	win := ui.New(cfg, *debug, store)
+
+	if *autoAddr != "" {
+		srv := automation.New(win)
+		if err := srv.Start(*autoAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "Automation server failed: %v\n", err)
+		} else {
+			defer srv.Stop()
+		}
+	}
+
 	win.Run()
 }
 

@@ -9,14 +9,17 @@ import (
 
 // CelestialObject represents a star or deep-sky object from the catalog.
 type CelestialObject struct {
-	ID         int     `db:"id"`
-	Name       string  `db:"name"`
-	CatalogID  string  `db:"catalog_id"`
-	Type       string  `db:"type"`
-	RADeg      float64 `db:"ra_deg"`
-	DecDeg     float64 `db:"dec_deg"`
-	Magnitude  float64 `db:"magnitude"`
-	SizeArcMin float64 `db:"size_arcmin"`
+	ID          int     `db:"id"`
+	Name        string  `db:"name"`
+	CatalogID   string  `db:"catalog_id"`
+	Type        string  `db:"type"`
+	RADeg       float64 `db:"ra_deg"`
+	DecDeg      float64 `db:"dec_deg"`
+	Magnitude   float64 `db:"magnitude"`
+	SizeArcMin  float64 `db:"size_arcmin"`
+	Category    string  `db:"category"`
+	Difficulty  string  `db:"difficulty"`
+	Description string  `db:"description"`
 }
 
 // CaptureSession records metadata for a completed stacking session.
@@ -65,11 +68,16 @@ func (s *Store) migrate() error {
 		ra_deg REAL NOT NULL,
 		dec_deg REAL NOT NULL,
 		magnitude REAL,
-		size_arcmin REAL
+		size_arcmin REAL,
+		category TEXT DEFAULT '',
+		difficulty TEXT DEFAULT '',
+		description TEXT DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_coords ON celestial_objects(ra_deg, dec_deg);
 	CREATE INDEX IF NOT EXISTS idx_name ON celestial_objects(name);
 	CREATE INDEX IF NOT EXISTS idx_catalog ON celestial_objects(catalog_id);
+	CREATE INDEX IF NOT EXISTS idx_category ON celestial_objects(category);
+	CREATE INDEX IF NOT EXISTS idx_difficulty ON celestial_objects(difficulty);
 
 	CREATE TABLE IF NOT EXISTS capture_sessions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,7 +102,8 @@ func (s *Store) SearchByName(query string, limit int) ([]CelestialObject, error)
 	q := "%" + query + "%"
 	rows, err := s.db.Query(`
 		SELECT id, COALESCE(name,''), COALESCE(catalog_id,''), COALESCE(type,''),
-		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0)
+		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0),
+		       COALESCE(category,''), COALESCE(difficulty,''), COALESCE(description,'')
 		FROM celestial_objects
 		WHERE name LIKE ? OR catalog_id LIKE ?
 		ORDER BY magnitude ASC
@@ -114,7 +123,8 @@ func (s *Store) SearchByCoords(raMin, raMax, decMin, decMax float64, limit int) 
 	}
 	rows, err := s.db.Query(`
 		SELECT id, COALESCE(name,''), COALESCE(catalog_id,''), COALESCE(type,''),
-		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0)
+		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0),
+		       COALESCE(category,''), COALESCE(difficulty,''), COALESCE(description,'')
 		FROM celestial_objects
 		WHERE ra_deg BETWEEN ? AND ? AND dec_deg BETWEEN ? AND ?
 		ORDER BY magnitude ASC
@@ -137,9 +147,10 @@ func (s *Store) ObjectCount() (int, error) {
 // InsertObject adds a single object to the catalog.
 func (s *Store) InsertObject(obj CelestialObject) error {
 	_, err := s.db.Exec(`
-		INSERT OR IGNORE INTO celestial_objects (name, catalog_id, type, ra_deg, dec_deg, magnitude, size_arcmin)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, obj.Name, obj.CatalogID, obj.Type, obj.RADeg, obj.DecDeg, obj.Magnitude, obj.SizeArcMin)
+		INSERT OR IGNORE INTO celestial_objects (name, catalog_id, type, ra_deg, dec_deg, magnitude, size_arcmin, category, difficulty, description)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, obj.Name, obj.CatalogID, obj.Type, obj.RADeg, obj.DecDeg, obj.Magnitude, obj.SizeArcMin,
+		obj.Category, obj.Difficulty, obj.Description)
 	return err
 }
 
@@ -151,8 +162,8 @@ func (s *Store) BulkInsert(objects []CelestialObject) (int, error) {
 	}
 
 	stmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO celestial_objects (name, catalog_id, type, ra_deg, dec_deg, magnitude, size_arcmin)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT OR IGNORE INTO celestial_objects (name, catalog_id, type, ra_deg, dec_deg, magnitude, size_arcmin, category, difficulty, description)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		tx.Rollback()
@@ -162,7 +173,8 @@ func (s *Store) BulkInsert(objects []CelestialObject) (int, error) {
 
 	inserted := 0
 	for _, obj := range objects {
-		res, err := stmt.Exec(obj.Name, obj.CatalogID, obj.Type, obj.RADeg, obj.DecDeg, obj.Magnitude, obj.SizeArcMin)
+		res, err := stmt.Exec(obj.Name, obj.CatalogID, obj.Type, obj.RADeg, obj.DecDeg, obj.Magnitude, obj.SizeArcMin,
+			obj.Category, obj.Difficulty, obj.Description)
 		if err != nil {
 			continue
 		}
@@ -217,12 +229,113 @@ func (s *Store) RecentSessions(limit int) ([]CaptureSession, error) {
 	return sessions, nil
 }
 
+// SearchFiltered finds objects matching a name query with optional difficulty and category filters.
+func (s *Store) SearchFiltered(query, difficulty, category string, limit int) ([]CelestialObject, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	where := "1=1"
+	args := []interface{}{}
+	if query != "" {
+		where += " AND (name LIKE ? OR catalog_id LIKE ?)"
+		q := "%" + query + "%"
+		args = append(args, q, q)
+	}
+	if difficulty != "" {
+		where += " AND difficulty = ?"
+		args = append(args, difficulty)
+	}
+	if category != "" {
+		where += " AND category = ?"
+		args = append(args, category)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(name,''), COALESCE(catalog_id,''), COALESCE(type,''),
+		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0),
+		       COALESCE(category,''), COALESCE(difficulty,''), COALESCE(description,'')
+		FROM celestial_objects
+		WHERE `+where+`
+		ORDER BY magnitude ASC
+		LIMIT ?
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanObjects(rows)
+}
+
+// SearchByDifficulty returns objects at the given difficulty level, ordered by magnitude.
+func (s *Store) SearchByDifficulty(difficulty string, limit int) ([]CelestialObject, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(name,''), COALESCE(catalog_id,''), COALESCE(type,''),
+		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0),
+		       COALESCE(category,''), COALESCE(difficulty,''), COALESCE(description,'')
+		FROM celestial_objects
+		WHERE difficulty = ?
+		ORDER BY magnitude ASC
+		LIMIT ?
+	`, difficulty, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanObjects(rows)
+}
+
+// SearchByCategory returns objects in the given category, ordered by magnitude.
+func (s *Store) SearchByCategory(category string, limit int) ([]CelestialObject, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(name,''), COALESCE(catalog_id,''), COALESCE(type,''),
+		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0),
+		       COALESCE(category,''), COALESCE(difficulty,''), COALESCE(description,'')
+		FROM celestial_objects
+		WHERE category = ?
+		ORDER BY magnitude ASC
+		LIMIT ?
+	`, category, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanObjects(rows)
+}
+
+// BrightStars returns catalog stars brighter than magLimit, ordered by magnitude.
+func (s *Store) BrightStars(magLimit float64, limit int) ([]CelestialObject, error) {
+	if limit <= 0 {
+		limit = 3000
+	}
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(name,''), COALESCE(catalog_id,''), COALESCE(type,''),
+		       ra_deg, dec_deg, COALESCE(magnitude,99), COALESCE(size_arcmin,0),
+		       COALESCE(category,''), COALESCE(difficulty,''), COALESCE(description,'')
+		FROM celestial_objects
+		WHERE magnitude <= ? AND (type IN ('Star', 'star', 'Double Star', 'Variable Star') OR category = 'HYG')
+		ORDER BY magnitude ASC
+		LIMIT ?
+	`, magLimit, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanObjects(rows)
+}
+
 func scanObjects(rows *sql.Rows) ([]CelestialObject, error) {
 	var objects []CelestialObject
 	for rows.Next() {
 		var obj CelestialObject
 		if err := rows.Scan(&obj.ID, &obj.Name, &obj.CatalogID, &obj.Type,
-			&obj.RADeg, &obj.DecDeg, &obj.Magnitude, &obj.SizeArcMin); err != nil {
+			&obj.RADeg, &obj.DecDeg, &obj.Magnitude, &obj.SizeArcMin,
+			&obj.Category, &obj.Difficulty, &obj.Description); err != nil {
 			continue
 		}
 		objects = append(objects, obj)

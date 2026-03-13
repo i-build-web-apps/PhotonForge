@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"math/rand"
@@ -74,7 +75,7 @@ func (d *DirectoryProvider) Read() *image.NRGBA {
 		d.index = 0
 	}
 
-	img, err := loadImage(d.files[d.index])
+	img, err := LoadImage(d.files[d.index])
 	if err != nil {
 		return nil
 	}
@@ -93,8 +94,8 @@ func (d *DirectoryProvider) Close() error {
 	return nil
 }
 
-// loadImage reads an image file and converts it to NRGBA.
-func loadImage(path string) (*image.NRGBA, error) {
+// LoadImage reads an image file and converts it to NRGBA.
+func LoadImage(path string) (*image.NRGBA, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -109,6 +110,8 @@ func loadImage(path string) (*image.NRGBA, error) {
 		img, err = png.Decode(f)
 	case ".jpg", ".jpeg":
 		img, err = jpeg.Decode(f)
+	case ".gif":
+		img, err = gif.Decode(f)
 	default:
 		// Use generic decoder for bmp, tiff, etc.
 		img, _, err = image.Decode(f)
