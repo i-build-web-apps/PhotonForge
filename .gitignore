@@ -2,8 +2,9 @@
 photonforge
 *.exe
 
-# Database
+# Database (except pre-built catalog)
 *.db
+!data/photonforge.db
 
 # IDE
 .idea/
@@ -18,7 +19,8 @@ Thumbs.db
 sim/
 
 # Catalog data (large CSVs - download separately)
-data/
+data/*
+!data/photonforge.db
 
 # Local OpenCV build (no longer needed)
 .opencv/
